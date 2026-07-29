@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "nginx-proxy.fullname" . }}
+  labels:
+    {{- include "nginx-proxy.labels" . | nindent 4 }}
+{{- $root := . }}
+{{- range $namespace := .Values.index.namespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "nginx-proxy.fullname" $root }}-service-reader
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "nginx-proxy.labels" $root | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "nginx-proxy.fullname" $root }}-service-reader
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "nginx-proxy.labels" $root | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "nginx-proxy.fullname" $root }}-service-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nginx-proxy.fullname" $root }}
+    namespace: {{ $root.Release.Namespace }}
+{{- end }}

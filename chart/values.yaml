@@ -1,0 +1,38 @@
+replicaCount: 1
+
+image:
+  repository: openresty/openresty
+  tag: "1.31.1.1-2-alpine-fat"
+  pullPolicy: IfNotPresent
+
+service:
+  type: LoadBalancer
+  port: 80
+  annotations: {}
+
+proxy:
+  baseDomain: <base_domain>
+  resolver: kube-dns.kube-system.svc.cluster.local
+  clusterDomain: cluster.local
+  upstream:
+    port: 4040
+
+index:
+  scheme: http
+  linkFormat: path
+  cacheSeconds: 30
+  namespaces:
+    - <namespace>
+
+resources:
+  requests:
+    cpu: "1"
+    memory: "4Gi"
+  limits:
+    memory: "4Gi"
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
