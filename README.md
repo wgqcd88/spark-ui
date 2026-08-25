@@ -82,6 +82,11 @@ Ingress 必须将 `*.<base-domain>` 路由到 `spark-ui` Service。
 `spec.selector.spark-app-name`，最后回退为 Service 名称。Spark App ID 同样从标签或
 selector 中的 `spark-app-selector` 获取。
 
+单个命名空间读取失败时，索引页仍会展示其他可访问命名空间中的 Spark Service，并在页面
+中列出失败的命名空间和排查提示。权限错误（HTTP 403）通常表示对应命名空间中的 Role 或
+RoleBinding 缺失。包含读取失败提示的页面不会被缓存，修复权限或配置后刷新即可恢复；如果
+所有命名空间均读取失败，页面会显示友好错误说明并返回 HTTP 503。
+
 ## 配置
 
 | 参数 | 默认值 | 说明 |
