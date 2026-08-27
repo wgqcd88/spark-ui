@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spark &amp; Flink Services</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <main class="page-shell">
+    <header class="page-header">
+      <div>
+        <h1>Spark &amp; Flink Services</h1>
+        <p class="subtitle">Active Spark driver and Flink cluster user interfaces</p>
+      </div>
+      <button id="refresh-services" class="secondary-button" type="button">刷新</button>
+    </header>
+
+    <section id="namespace-warning" class="namespace-warning" role="alert" aria-labelledby="warning-title" hidden>
+      <h2 id="warning-title"></h2>
+      <p id="warning-summary"></p>
+      <ul id="warning-list"></ul>
+    </section>
+
+    <form id="service-search-form" class="search" role="search">
+      <label for="service-search">搜索</label>
+      <input
+        id="service-search"
+        name="q"
+        type="search"
+        placeholder="搜索应用名称、Service 名称、Namespace 或应用 ID"
+        autocomplete="off"
+      >
+      <button type="submit">搜索</button>
+    </form>
+
+    <p id="load-status" class="load-status" aria-live="polite"></p>
+
+    <div class="service-columns" aria-hidden="true">
+      <span>应用名称</span>
+      <span>分类</span>
+      <span>应用 ID</span>
+      <span>运行时间</span>
+    </div>
+    <ul id="service-list" class="service-list" aria-live="polite"></ul>
+
+    <noscript>
+      <p class="javascript-warning">此页面需要启用 JavaScript 才能加载 Spark 和 Flink 服务列表。</p>
+    </noscript>
+  </main>
+</body>
+</html>

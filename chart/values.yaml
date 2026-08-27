@@ -16,6 +16,8 @@ proxy:
   clusterDomain: cluster.local
   upstream:
     port: 4040
+  flinkUpstream:
+    port: 8081
 
 index:
   scheme: http

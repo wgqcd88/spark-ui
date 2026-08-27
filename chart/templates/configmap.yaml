@@ -2,6 +2,9 @@
 {{- if not (has $linkFormat (list "path" "subdomain")) -}}
 {{- fail "index.linkFormat must be \"path\" or \"subdomain\"" -}}
 {{- end -}}
+{{- if empty .Values.index.namespaces -}}
+{{- fail "index.namespaces must contain at least one namespace" -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -17,6 +20,25 @@ data:
       server_name {{ .Values.proxy.baseDomain }};
 
       resolver {{ .Values.proxy.resolver }} valid=10s;
+
+      location ~ ^/flink/(?<service>[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)/(?<namespace>{{ join "|" .Values.index.namespaces }})(?<ui_path>/.*)$ {
+        proxy_pass http://$service.$namespace.svc.{{ .Values.proxy.clusterDomain }}:{{ .Values.proxy.flinkUpstream.port }}$ui_path$is_args$args;
+        {{- if eq $linkFormat "path" }}
+        proxy_redirect ~^https?://[^/]+(/.*)$ /flink/$service/$namespace$1;
+        proxy_redirect ~^(/.*)$ /flink/$service/$namespace$1;
+        absolute_redirect off;
+        sub_filter_once off;
+        sub_filter 'href="/' 'href="/flink/$service/$namespace/';
+        sub_filter 'src="/' 'src="/flink/$service/$namespace/';
+        sub_filter 'action="/' 'action="/flink/$service/$namespace/';
+        {{- end }}
+        proxy_http_version 1.1;
+        proxy_set_header Accept-Encoding "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+      }
 
       location ~ ^/(?<service>[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)/(?<namespace>{{ join "|" .Values.index.namespaces }})(?<ui_path>/.*)$ {
         proxy_pass http://$service.$namespace.svc.{{ .Values.proxy.clusterDomain }}:{{ .Values.proxy.upstream.port }}$ui_path$is_args$args;
@@ -41,8 +63,47 @@ data:
         proxy_set_header X-Forwarded-Proto $scheme;
       }
 
-      location / {
-        content_by_lua_file /etc/nginx/lua/spark-index.lua;
+      location = /api/services {
+        content_by_lua_file /etc/spark-ui/spark-services.lua;
+      }
+
+      location = / {
+        root /etc/spark-ui;
+        index index.html;
+      }
+
+      location = /index.html {
+        internal;
+        root /etc/spark-ui;
+        add_header Cache-Control "no-cache";
+      }
+
+      location = /assets/app.css {
+        alias /etc/spark-ui/app.css;
+        default_type text/css;
+        add_header Cache-Control "no-cache";
+        add_header X-Content-Type-Options "nosniff";
+      }
+
+      location = /assets/app.js {
+        alias /etc/spark-ui/app.js;
+        default_type application/javascript;
+        add_header Cache-Control "no-cache";
+        add_header X-Content-Type-Options "nosniff";
+      }
+
+      location = /assets/spark-logo.svg {
+        alias /etc/spark-ui/spark-logo.svg;
+        default_type image/svg+xml;
+        add_header Cache-Control "no-cache";
+        add_header X-Content-Type-Options "nosniff";
+      }
+
+      location = /assets/flink-logo.svg {
+        alias /etc/spark-ui/flink-logo.svg;
+        default_type image/svg+xml;
+        add_header Cache-Control "no-cache";
+        add_header X-Content-Type-Options "nosniff";
       }
 
       location = /favicon.ico {
@@ -64,7 +125,22 @@ data:
         proxy_ssl_verify on;
         proxy_set_header Authorization "Bearer $kubernetes_token";
       }
+    }
 
+    server {
+      listen 8080;
+      server_name ~^flink--(?<namespace>{{ join "|" .Values.index.namespaces }})--(?<service>[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\.{{ .Values.proxy.baseDomain | replace "." "\\." }}$;
+
+      resolver {{ .Values.proxy.resolver }} valid=10s;
+
+      location / {
+        proxy_pass http://$service.$namespace.svc.{{ .Values.proxy.clusterDomain }}:{{ .Values.proxy.flinkUpstream.port }};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+      }
     }
 
     server {
@@ -82,431 +158,15 @@ data:
         proxy_set_header X-Forwarded-Proto $scheme;
       }
     }
-  spark-index.lua: |
-    local cjson = require "cjson.safe"
-    local cache = ngx.shared.spark_service_index
-    local query = ngx.var.arg_q
-    if query then
-      query = query:lower()
-    end
-    local page
-    if not query then
-      page = cache:get("page")
-    end
-    local function html_escape(value)
-      return (value:gsub("[&<>'\"]", {
-        ["&"] = "&amp;",
-        ["<"] = "&lt;",
-        [">"] = "&gt;",
-        ["'"] = "&#39;",
-        ["\""] = "&quot;"
-      }))
-    end
-    local function format_duration(seconds)
-      if seconds < 60 then
-        return string.format("%ds", seconds)
-      end
-      if seconds < 3600 then
-        return string.format("%dm %02ds", math.floor(seconds / 60), seconds % 60)
-      end
-      if seconds < 86400 then
-        return string.format(
-          "%dh %02dm %02ds",
-          math.floor(seconds / 3600),
-          math.floor(seconds % 3600 / 60),
-          seconds % 60
-        )
-      end
-      return string.format(
-        "%dd %02dh %02dm %02ds",
-        math.floor(seconds / 86400),
-        math.floor(seconds % 86400 / 3600),
-        math.floor(seconds % 3600 / 60),
-        seconds % 60
-      )
-    end
-    local function elapsed_since(timestamp)
-      if not timestamp then
-        return nil
-      end
-
-      local year, month, day, hour, minute, second = timestamp:match(
-        "^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)%.?%d*Z$"
-      )
-      if not year then
-        return nil
-      end
-
-      local local_time = os.time({
-        year = tonumber(year),
-        month = tonumber(month),
-        day = tonumber(day),
-        hour = tonumber(hour),
-        min = tonumber(minute),
-        sec = tonumber(second)
-      })
-      local utc_time = local_time + os.difftime(
-        local_time,
-        os.time(os.date("!*t", local_time))
-      )
-      return format_duration(math.max(0, ngx.time() - utc_time))
-    end
-    local namespaces = {
-    {{- range .Values.index.namespaces }}
-      {{ . | quote }},
-    {{- end }}
-    }
-    local response_status = ngx.HTTP_OK
-    if not page then
-      local links = {}
-      local namespace_errors = {}
-      local successful_namespaces = 0
-
-      local function api_error_message(status)
-        if status == 401 then
-          return "身份认证失败（HTTP 401），请检查 ServiceAccount 配置。"
-        end
-        if status == 403 then
-          return "无权读取 Service（HTTP 403），请检查该命名空间中的 Role 和 RoleBinding 是否存在。"
-        end
-        if status == 404 then
-          return "命名空间不存在（HTTP 404），请检查 index.namespaces 配置。"
-        end
-        return string.format("Kubernetes API 请求失败（HTTP %s），请稍后重试。", tostring(status))
-      end
-
-      local function get_namespace_services(namespace)
-        local response = ngx.location.capture("/_kubernetes_services", {
-          args = { namespace = namespace }
-        })
-        if response.status ~= ngx.HTTP_OK then
-          ngx.log(ngx.ERR, "Kubernetes Service API returned ", response.status, " for namespace ", namespace)
-          return nil, api_error_message(response.status)
-        end
-
-        local services, decode_error = cjson.decode(response.body)
-        if type(services) ~= "table" or type(services.items) ~= "table" then
-          ngx.log(
-            ngx.ERR,
-            "Kubernetes Service API returned invalid JSON for namespace ",
-            namespace,
-            ": ",
-            decode_error or "missing items"
-          )
-          return nil, "Kubernetes API 返回了异常数据，请稍后重试。"
-        end
-
-        return services.items
-      end
-
-      for _, namespace in ipairs(namespaces) do
-        local services, namespace_error = get_namespace_services(namespace)
-        if namespace_error then
-          namespace_errors[#namespace_errors + 1] = {
-            namespace = namespace,
-            message = namespace_error
-          }
-        else
-          successful_namespaces = successful_namespaces + 1
-          for _, service in ipairs(services) do
-            local ports = service.spec and service.spec.ports or {}
-            local is_spark_ui = #ports == 0
-            for _, port in ipairs(ports) do
-              if port.port == {{ .Values.proxy.upstream.port }} then
-                is_spark_ui = true
-                break
-              end
-            end
-
-            local metadata = service.metadata or {}
-            local name = metadata.name
-            if is_spark_ui and name then
-              local labels = metadata.labels or {}
-              local selector = service.spec and service.spec.selector or {}
-              local display_name = labels["spark-app-name"] or selector["spark-app-name"] or name
-              local app_id = labels["spark-app-selector"] or selector["spark-app-selector"]
-              local elapsed = elapsed_since(metadata.creationTimestamp)
-              local search_terms = { namespace, name, display_name }
-              if app_id then
-                search_terms[#search_terms + 1] = app_id
-              end
-              local search_text = table.concat(search_terms, " ")
-              if not query or search_text:lower():find(query, 1, true) then
-                {{- if eq $linkFormat "path" }}
-                local link_host = html_escape(ngx.var.host)
-                links[#links + 1] = string.format(
-                  '<li data-search="%s"><a class="service-link" href="{{ .Values.index.scheme }}://%s/%s/%s/jobs" target="_blank" rel="noopener noreferrer">%s/%s</a><span class="app-id">%s</span><span class="runtime">%s</span></li>',
-                  html_escape(search_text),
-                  link_host,
-                  name,
-                  namespace,
-                  namespace,
-                  html_escape(display_name),
-                  app_id and html_escape(app_id) or "-",
-                  elapsed or "-"
-                )
-                {{- else }}
-                links[#links + 1] = string.format(
-                  '<li data-search="%s"><a class="service-link" href="{{ .Values.index.scheme }}://%s--%s.{{ .Values.proxy.baseDomain }}" target="_blank" rel="noopener noreferrer">%s/%s</a><span class="app-id">%s</span><span class="runtime">%s</span></li>',
-                  html_escape(search_text),
-                  namespace,
-                  name,
-                  namespace,
-                  html_escape(display_name),
-                  app_id and html_escape(app_id) or "-",
-                  elapsed or "-"
-                )
-                {{- end }}
-              end
-            end
-          end
-        end
-      end
-
-      table.sort(links)
-      if #links == 0 then
-        if query then
-          links[1] = "<li>没有匹配的 Spark 服务。</li>"
-        elseif successful_namespaces > 0 then
-          links[1] = "<li>未在可访问的命名空间中发现 Spark 服务。</li>"
-        else
-          links[1] = "<li>暂时无法加载 Spark 服务。</li>"
-        end
-      end
-
-      local namespace_warning = ""
-      if #namespace_errors > 0 then
-        local warning_items = {}
-        for _, namespace_error in ipairs(namespace_errors) do
-          warning_items[#warning_items + 1] = string.format(
-            "<li><strong>%s</strong>：%s</li>",
-            html_escape(namespace_error.namespace),
-            html_escape(namespace_error.message)
-          )
-        end
-
-        local warning_title
-        local warning_summary
-        if successful_namespaces > 0 then
-          warning_title = "部分命名空间加载失败"
-          warning_summary = "已展示其他可正常访问命名空间中的结果；失败命名空间的数据暂未显示。"
-        else
-          warning_title = "Spark 服务暂时无法加载"
-          warning_summary = "所有命名空间均读取失败，请根据以下提示检查权限或配置后刷新页面。"
-          response_status = ngx.HTTP_SERVICE_UNAVAILABLE
-        end
-
-        namespace_warning = table.concat({
-          '<section class="namespace-warning" role="alert" aria-labelledby="namespace-warning-title">',
-          '<h2 id="namespace-warning-title">' .. warning_title .. "</h2>",
-          "<p>" .. warning_summary .. "</p>",
-          "<ul>",
-          table.concat(warning_items, "\n"),
-          "</ul>",
-          "</section>"
-        }, "\n")
-
-        cache:delete("page")
-      end
-
-      local search_input = string.format(
-        '<input id="service-search" name="q" type="search" placeholder="搜索应用名称、Service 名称或 App ID" value="%s" autocomplete="off">',
-        html_escape(query or "")
-      )
-      page = table.concat({
-        "<!doctype html>",
-        '<html lang="en">',
-        "<head>",
-        '<meta charset="utf-8">',
-        '<meta name="viewport" content="width=device-width, initial-scale=1">',
-        "<title>Spark Services</title>",
-        [[<style>
-          :root {
-            color: #1e293b;
-            background: #f8fafc;
-            font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-          }
-          body {
-            max-width: 960px;
-            margin: 0 auto;
-            padding: 48px 24px;
-          }
-          h1 {
-            margin: 0 0 8px;
-            font-size: 28px;
-          }
-          .subtitle {
-            margin: 0 0 28px;
-            color: #64748b;
-          }
-          .namespace-warning {
-            margin: 0 0 24px;
-            padding: 16px 18px;
-            color: #7c2d12;
-            background: #fff7ed;
-            border: 1px solid #fdba74;
-            border-radius: 10px;
-          }
-          .namespace-warning h2 {
-            margin: 0 0 6px;
-            font-size: 16px;
-          }
-          .namespace-warning p {
-            margin: 0;
-          }
-          .namespace-warning ul {
-            margin: 10px 0 0;
-            padding-left: 20px;
-          }
-          .namespace-warning li + li {
-            margin-top: 6px;
-          }
-          .search {
-            display: flex;
-            gap: 8px;
-            margin-bottom: 24px;
-          }
-          .search label {
-            position: absolute;
-            overflow: hidden;
-            width: 1px;
-            height: 1px;
-            clip: rect(0, 0, 0, 0);
-            color: #475569;
-            font-size: 14px;
-            font-weight: 600;
-          }
-          .search input {
-            box-sizing: border-box;
-            flex: 1;
-            width: 100%;
-            padding: 10px 12px;
-            color: #1e293b;
-            background: #fff;
-            border: 1px solid #cbd5e1;
-            border-radius: 8px;
-            font: inherit;
-          }
-          .search input:focus {
-            border-color: #2563eb;
-            outline: 3px solid rgb(37 99 235 / 15%);
-          }
-          .search button {
-            padding: 10px 16px;
-            color: #fff;
-            background: #2563eb;
-            border: 0;
-            border-radius: 8px;
-            font: inherit;
-            font-weight: 600;
-            cursor: pointer;
-          }
-          .search button:hover {
-            background: #1d4ed8;
-          }
-          .service-list {
-            display: grid;
-            gap: 12px;
-            margin: 0;
-            padding: 0;
-            list-style: none;
-          }
-          .service-columns, .service-list li {
-            display: grid;
-            grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.25fr) minmax(120px, 0.5fr);
-            gap: 16px;
-            align-items: center;
-          }
-          .service-columns {
-            padding: 0 18px;
-            color: #64748b;
-            font-size: 12px;
-            font-weight: 700;
-            letter-spacing: 0.05em;
-            text-transform: uppercase;
-          }
-          .service-list li {
-            padding: 16px 18px;
-            background: #fff;
-            border: 1px solid #e2e8f0;
-            border-radius: 10px;
-            box-shadow: 0 1px 2px rgb(15 23 42 / 4%);
-          }
-          .service-link {
-            color: #2563eb;
-            font-weight: 600;
-            text-decoration: none;
-          }
-          .service-link:hover {
-            text-decoration: underline;
-          }
-          .app-id, .runtime {
-            color: #475569;
-            font-size: 14px;
-          }
-          .app-id {
-            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-          }
-          .no-results {
-            margin: 20px 0 0;
-            color: #64748b;
-            text-align: center;
-          }
-          @media (max-width: 700px) {
-            .service-columns {
-              display: none;
-            }
-            .service-list li {
-              grid-template-columns: 1fr;
-              gap: 8px;
-            }
-          }
-        </style>]],
-        "</head>",
-        "<body>",
-        "<h1>Spark Services</h1>",
-        '<p class="subtitle">Active Spark driver user interfaces</p>',
-        namespace_warning,
-        '<form class="search" action="/" method="get">',
-        '<label for="service-search">搜索</label>',
-        search_input,
-        '<button type="submit">搜索</button>',
-        "</form>",
-        '<div class="service-columns"><span>应用名称</span><span>App ID</span><span>运行时间</span></div>',
-        '<ul class="service-list">',
-        table.concat(links, "\n"),
-        "</ul>",
-        '<p id="no-results" class="no-results" hidden>没有匹配的 Spark 服务。</p>',
-        [[<script>
-          const searchInput = document.getElementById("service-search");
-          const serviceRows = document.querySelectorAll(".service-list li[data-search]");
-          const noResults = document.getElementById("no-results");
-
-          searchInput.addEventListener("input", () => {
-            const query = searchInput.value.trim().toLocaleLowerCase();
-            let matches = 0;
-
-            serviceRows.forEach((row) => {
-              const matched = row.dataset.search.toLocaleLowerCase().includes(query);
-              row.hidden = !matched;
-              if (matched) {
-                matches += 1;
-              }
-            });
-
-            noResults.hidden = !query || matches > 0;
-          });
-        </script>]],
-        "</body>",
-        "</html>"
-      }, "\n")
-      if not query and #namespace_errors == 0 then
-        cache:set("page", page, {{ .Values.index.cacheSeconds }})
-      end
-    end
-
-    ngx.status = response_status
-    ngx.header.content_type = "text/html; charset=utf-8"
-    ngx.header["Cache-Control"] = "no-store, max-age=0"
-    ngx.header["Pragma"] = "no-cache"
-    ngx.print(page)
+  spark-services.lua: |
+{{ tpl (.Files.Get "files/backend/spark-services.lua") . | indent 4 }}
+  index.html: |
+{{ .Files.Get "files/frontend/index.html" | indent 4 }}
+  app.css: |
+{{ .Files.Get "files/frontend/app.css" | indent 4 }}
+  app.js: |
+{{ .Files.Get "files/frontend/app.js" | indent 4 }}
+  spark-logo.svg: |
+{{ .Files.Get "files/frontend/spark-logo.svg" | indent 4 }}
+  flink-logo.svg: |
+{{ .Files.Get "files/frontend/flink-logo.svg" | indent 4 }}

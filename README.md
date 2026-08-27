@@ -1,13 +1,24 @@
-# Spark UI
+# Spark & Flink UI
 
 `spark-ui` 是一个部署在 Kubernetes 中的 Helm Chart。它使用 OpenResty 反向代理 Spark
-Driver UI，并在根路径提供一个可搜索的 Spark Service 索引页。索引页会在指定的命名空间中
-发现 Service，将符合条件的服务链接到对应的 Spark UI。
+Driver UI 和 Flink Web UI，并在根路径提供一个可搜索的服务索引页。索引页会在指定的命名空间中
+发现 Service，将符合条件的服务链接到对应的 UI。
+
+## 架构
+
+- 前端是独立的 HTML、CSS 和 JavaScript 静态资源，负责调用接口、渲染服务列表、搜索以及
+  展示命名空间错误提示。
+- 后端是 OpenResty Lua 提供的 `GET /api/services` JSON 接口，负责访问 Kubernetes API、
+  识别 Spark 与 Flink Service、生成访问地址以及缓存成功的服务发现结果。
+- Nginx 负责提供静态资源、路由服务发现接口，并反向代理具体的 Spark Driver UI 和 Flink Web UI。
+
+前后端源文件分别位于 Chart 的 `files/frontend` 和 `files/backend` 目录，Lua 不再拼接或输出
+页面 HTML。
 
 ## 前置条件
 
 - Kubernetes 集群和 Helm 3。
-- Spark Driver UI 以 Kubernetes Service 暴露，默认监听端口为 `4040`。
+- Spark Driver UI 以 Kubernetes Service 暴露，默认监听端口为 `4040`；Flink Web UI 默认监听 `8081`。
 - `proxy.baseDomain` 对应的域名应解析到该 Chart 创建的 Service 的外部地址。
 - 集群 DNS 可以解析 `<service>.<namespace>.svc.<cluster-domain>`。默认
   `clusterDomain` 为 `cluster.local`，DNS resolver 为
@@ -23,7 +34,7 @@ RoleBinding。因此，发布者需要有在这些命名空间创建 RBAC 资源
 ```bash
 helm upgrade --install spark-ui \
   oci://ghcr.io/wgqcd88/charts/spark-ui \
-  --version 0.3.0 \
+  --version 0.5.0 \
   --set proxy.baseDomain=spark.example.com \
   --set index.namespaces='{spark,flink}' \
   --set index.linkFormat=path \
@@ -37,15 +48,15 @@ helm upgrade --install spark-ui \
 ```bash
 helm upgrade --install spark-ui \
   oci://ghcr.io/wgqcd88/charts/spark-ui \
-  --version 0.3.0 \
+  --version 0.5.0 \
   --values spark-ui-values.yaml \
   --namespace default \
   --create-namespace
 ```
 
-安装完成后，访问 `http://<base-domain>/` 可打开 Spark Service 索引。页面展示应用名称、
-Spark App ID 和 Service 创建至今的运行时间，并可按应用名称、Service 名称或 App ID
-实时过滤。
+安装完成后，访问 `http://<base-domain>/` 可打开 Spark 与 Flink Service 索引。页面展示应用名称、
+应用 ID 和 Service 创建至今的运行时间，并可按应用名称、Service 名称、命名空间或
+应用 ID 实时过滤。
 
 ## Spark UI 访问方式
 
@@ -55,6 +66,9 @@ Spark App ID 和 Service 创建至今的运行时间，并可按应用名称、S
 ```text
 http://<base-domain>/example-driver/spark/jobs
 ```
+
+服务发现接口在路径模式下返回同源相对地址，浏览器会自动沿用当前访问域名和协议，避免服务端
+缓存被不同的 Host 请求污染。
 
 除 `/jobs` 外，代理会转发该 Spark UI 下的其他路径、查询参数和 API 请求。路径模式还会
 重写 Spark UI 返回的绝对链接，使页面内的导航、静态资源和 API 请求继续经过代理。
@@ -70,10 +84,19 @@ http://spark--example-driver.<base-domain>/
 无论索引链接模式为何，Chart 都会保留对上述子域名请求的代理支持。要使用该方式，DNS 或
 Ingress 必须将 `*.<base-domain>` 路由到 `spark-ui` Service。
 
+Flink Service 在子域名兼容模式下使用 `flink--<namespace>--<service>.<base-domain>` 格式。
+
+## Flink UI 访问方式
+
+带有 `type=flink-native-kubernetes` 标签的 Service 会识别为 Flink UI，默认通过
+`/flink/<service>/<namespace>/` 路径代理到该 Service 的 `8081` 端口。应用名称优先使用
+`app` 或 `cluster-id` 标签；应用 ID 使用 `cluster-id`，不存在时回退为 `app`。
+
 ## 服务发现规则
 
-索引会轮询 `index.namespaces` 中每个命名空间的 Kubernetes Service API，并缓存未搜索
-的索引页面 `index.cacheSeconds` 秒。以下 Service 会被识别为 Spark UI：
+服务发现接口会轮询 `index.namespaces` 中每个命名空间的 Kubernetes Service API，并缓存
+全部命名空间均读取成功时的 JSON 结果 `index.cacheSeconds` 秒。以下 Service 会被识别为
+Spark UI：
 
 - Service 未定义任何端口；或
 - Service 至少有一个端口等于 `proxy.upstream.port`（默认 `4040`）。
@@ -82,10 +105,13 @@ Ingress 必须将 `*.<base-domain>` 路由到 `spark-ui` Service。
 `spec.selector.spark-app-name`，最后回退为 Service 名称。Spark App ID 同样从标签或
 selector 中的 `spark-app-selector` 获取。
 
-单个命名空间读取失败时，索引页仍会展示其他可访问命名空间中的 Spark Service，并在页面
+标签 `type=flink-native-kubernetes` 且至少有一个端口等于 `proxy.flinkUpstream.port`（默认 `8081`）
+的 Service 会被识别为 Flink UI。这样会排除同一 Flink 集群仅用于内部通信的 Service。
+
+单个命名空间读取失败时，索引页仍会展示其他可访问命名空间中的 Spark 与 Flink Service，并在页面
 中列出失败的命名空间和排查提示。权限错误（HTTP 403）通常表示对应命名空间中的 Role 或
-RoleBinding 缺失。包含读取失败提示的页面不会被缓存，修复权限或配置后刷新即可恢复；如果
-所有命名空间均读取失败，页面会显示友好错误说明并返回 HTTP 503。
+RoleBinding 缺失。包含命名空间错误的 API 结果不会被缓存，修复权限或配置后刷新即可恢复；
+如果所有命名空间均读取失败，接口返回 HTTP 503 和结构化错误，页面仍会显示友好错误说明。
 
 ## 配置
 
@@ -99,13 +125,14 @@ RoleBinding 缺失。包含读取失败提示的页面不会被缓存，修复�
 | `service.port` | `80` | Service 对外 HTTP 端口。 |
 | `service.annotations` | `{}` | 追加到 Service 的注解，例如云负载均衡器注解。 |
 | `proxy.baseDomain` | `<base_domain>` | 访问索引和生成链接使用的基础域名。安装时必须替换。 |
-| `proxy.resolver` | `kube-dns.kube-system.svc.cluster.local` | 用于解析 Spark Service 的集群 DNS resolver。 |
+| `proxy.resolver` | `kube-dns.kube-system.svc.cluster.local` | 用于解析 Spark 和 Flink Service 的集群 DNS resolver。 |
 | `proxy.clusterDomain` | `cluster.local` | Kubernetes Service DNS 后缀。 |
 | `proxy.upstream.port` | `4040` | Spark UI Service 端口，也是服务发现使用的端口。 |
+| `proxy.flinkUpstream.port` | `8081` | Flink Web UI Service 端口。 |
 | `index.scheme` | `http` | 索引生成链接使用的协议；HTTPS 终止在外部 Ingress/LB 时设为 `https`。 |
 | `index.linkFormat` | `path` | 索引链接格式，可选 `path` 或 `subdomain`。 |
-| `index.cacheSeconds` | `30` | 未带搜索参数的索引页缓存秒数；设为 `0` 表示不设置过期时间。 |
-| `index.namespaces` | `["<namespace>"]` | 要发现 Spark Service 的命名空间列表，同时决定创建 RBAC 的范围。 |
+| `index.cacheSeconds` | `30` | 成功的服务发现 API 结果缓存秒数；设为 `0` 表示不设置过期时间。 |
+| `index.namespaces` | `["<namespace>"]` | 要发现 Spark 和 Flink Service 的命名空间列表，同时决定创建 RBAC 的范围。 |
 | `resources` | CPU `1`、内存 `4Gi` | OpenResty 容器的 requests 和 limits。 |
 | `nodeSelector` | `{}` | Pod 节点选择器。 |
 | `tolerations` | `[]` | Pod tolerations。 |
@@ -131,6 +158,8 @@ proxy:
   clusterDomain: cluster.local
   upstream:
     port: 4040
+  flinkUpstream:
+    port: 8081
 
 index:
   scheme: https
@@ -149,7 +178,7 @@ nodeSelector:
 ```bash
 helm upgrade --install spark-ui \
   oci://ghcr.io/wgqcd88/charts/spark-ui \
-  --version 0.3.0 \
+  --version 0.5.0 \
   --values values.yaml \
   --namespace default \
   --create-namespace
@@ -162,7 +191,7 @@ helm upgrade --install spark-ui \
 ```bash
 helm upgrade spark-ui \
   oci://ghcr.io/wgqcd88/charts/spark-ui \
-  --version 0.3.0 \
+  --version 0.5.0 \
   --values values.yaml \
   --namespace default
 ```
