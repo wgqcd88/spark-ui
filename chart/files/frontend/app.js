@@ -6,6 +6,8 @@ const state = {
 
 const searchForm = document.getElementById("service-search-form");
 const searchInput = document.getElementById("service-search");
+const typeFilter = document.getElementById("service-type-filter");
+const namespaceFilter = document.getElementById("service-namespace-filter");
 const refreshButton = document.getElementById("refresh-services");
 const serviceList = document.getElementById("service-list");
 const loadStatus = document.getElementById("load-status");
@@ -13,6 +15,8 @@ const warning = document.getElementById("namespace-warning");
 const warningTitle = document.getElementById("warning-title");
 const warningSummary = document.getElementById("warning-summary");
 const warningList = document.getElementById("warning-list");
+let pendingNamespaceFilter = "";
+let searchTimer = 0;
 
 function arrayValue(value) {
   return Array.isArray(value) ? value : [];
@@ -120,13 +124,28 @@ function serviceCategory(service) {
 }
 
 function emptyMessage(query) {
-  if (query) {
+  if (query || typeFilter.value || namespaceFilter.value) {
     return "没有匹配的 Spark 或 Flink 服务。";
   }
   if (state.successfulNamespaces > 0) {
     return "未在可访问的命名空间中发现 Spark 或 Flink 服务。";
   }
   return "暂时无法加载 Spark 或 Flink 服务。";
+}
+
+function updateNamespaceFilter(namespaces) {
+  const selectedNamespace = pendingNamespaceFilter || namespaceFilter.value;
+  const visibleNamespaces = [...new Set(namespaces.map(stringValue).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right));
+
+  namespaceFilter.replaceChildren();
+  namespaceFilter.append(new Option("全部命名空间", ""));
+  for (const namespace of visibleNamespaces) {
+    namespaceFilter.append(new Option(namespace, namespace));
+  }
+
+  namespaceFilter.value = visibleNamespaces.includes(selectedNamespace) ? selectedNamespace : "";
+  pendingNamespaceFilter = "";
 }
 
 function renderServices() {
@@ -141,7 +160,7 @@ function renderServices() {
   }
 
   const query = searchInput.value.trim().toLocaleLowerCase();
-  const visibleServices = state.services.filter((service) => searchableText(service).includes(query));
+  const visibleServices = state.services;
 
   if (visibleServices.length === 0) {
     const item = document.createElement("li");
@@ -204,12 +223,48 @@ function updateRuntimes() {
 function updateQueryUrl() {
   const url = new URL(window.location.href);
   const query = searchInput.value.trim();
+  const selectedType = typeFilter.value;
+  const selectedNamespace = namespaceFilter.value;
   if (query) {
     url.searchParams.set("q", query);
   } else {
     url.searchParams.delete("q");
   }
+  if (selectedType) {
+    url.searchParams.set("type", selectedType);
+  } else {
+    url.searchParams.delete("type");
+  }
+  if (selectedNamespace) {
+    url.searchParams.set("namespace", selectedNamespace);
+  } else {
+    url.searchParams.delete("namespace");
+  }
   window.history.replaceState(null, "", url);
+}
+
+function serviceApiUrl() {
+  const url = new URL("/api/services", window.location.origin);
+  const query = searchInput.value.trim();
+  const selectedType = typeFilter.value;
+  const selectedNamespace = namespaceFilter.value;
+
+  if (query) {
+    url.searchParams.set("q", query);
+  }
+  if (selectedType) {
+    url.searchParams.set("type", selectedType);
+  }
+  if (selectedNamespace) {
+    url.searchParams.set("namespace", selectedNamespace);
+  }
+
+  return `${url.pathname}${url.search}`;
+}
+
+function scheduleLoadServices() {
+  window.clearTimeout(searchTimer);
+  searchTimer = window.setTimeout(loadServices, 250);
 }
 
 function updateLoadStatus(serviceCount, errors) {
@@ -229,7 +284,7 @@ async function loadServices() {
   renderServices();
 
   try {
-    const response = await fetch("/api/services", {
+    const response = await fetch(serviceApiUrl(), {
       headers: { Accept: "application/json" },
       cache: "no-store"
     });
@@ -249,9 +304,11 @@ async function loadServices() {
 
     const summary = payload && typeof payload.summary === "object" ? payload.summary : {};
     const successfulNamespaces = Number(summary.successfulNamespaces);
+    const namespaces = arrayValue(summary.namespaces);
 
     state.services = services;
     state.successfulNamespaces = Number.isFinite(successfulNamespaces) ? successfulNamespaces : 0;
+    updateNamespaceFilter(namespaces.length > 0 ? namespaces : services.map((service) => service.namespace));
     renderWarnings(errors, state.successfulNamespaces);
     updateLoadStatus(services.length, errors);
   } catch (error) {
@@ -269,24 +326,43 @@ async function loadServices() {
 }
 
 const initialQuery = new URLSearchParams(window.location.search).get("q");
+const initialType = new URLSearchParams(window.location.search).get("type");
+const initialNamespace = new URLSearchParams(window.location.search).get("namespace");
 searchInput.value = initialQuery || "";
+typeFilter.value = initialType === "spark" || initialType === "flink" ? initialType : "";
+pendingNamespaceFilter = initialNamespace || "";
 
 searchForm.addEventListener("submit", (event) => {
   event.preventDefault();
   updateQueryUrl();
-  renderServices();
+  loadServices();
 });
 
 searchInput.addEventListener("input", () => {
   updateQueryUrl();
-  renderServices();
+  scheduleLoadServices();
+});
+
+typeFilter.addEventListener("change", () => {
+  updateQueryUrl();
+  loadServices();
+});
+
+namespaceFilter.addEventListener("change", () => {
+  updateQueryUrl();
+  loadServices();
 });
 
 refreshButton.addEventListener("click", loadServices);
 
 window.addEventListener("popstate", () => {
-  searchInput.value = new URLSearchParams(window.location.search).get("q") || "";
-  renderServices();
+  const searchParams = new URLSearchParams(window.location.search);
+  const type = searchParams.get("type");
+  searchInput.value = searchParams.get("q") || "";
+  typeFilter.value = type === "spark" || type === "flink" ? type : "";
+  pendingNamespaceFilter = searchParams.get("namespace") || "";
+  updateNamespaceFilter(arrayValue(state.services.map((service) => service.namespace)));
+  loadServices();
 });
 
 window.setInterval(updateRuntimes, 1000);

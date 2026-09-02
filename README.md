@@ -98,6 +98,12 @@ Flink Service 在子域名兼容模式下使用 `flink--<namespace>--<service>.<
 全部命名空间均读取成功时的 JSON 结果 `index.cacheSeconds` 秒。以下 Service 会被识别为
 Spark UI：
 
+`GET /api/services` 支持以下查询参数，默认均不限制：
+
+- `q`：按命名空间、资源名、应用名称、应用 ID 或类型做模糊匹配。
+- `type`：按应用类型过滤，可选 `spark` 或 `flink`。
+- `namespace`：按命名空间过滤，必须是 `index.namespaces` 中配置的命名空间。
+
 - Service 未定义任何端口；或
 - Service 至少有一个端口等于 `proxy.upstream.port`（默认 `4040`）。
 
@@ -107,6 +113,13 @@ selector 中的 `spark-app-selector` 获取。
 
 标签 `type=flink-native-kubernetes` 且至少有一个端口等于 `proxy.flinkUpstream.port`（默认 `8081`）
 的 Service 会被识别为 Flink UI。这样会排除同一 Flink 集群仅用于内部通信的 Service。
+
+### Pod 查询模式
+
+将 `index.discoveryMode` 设为 `pod` 后，索引会改为查询 Pod，并直接代理到 Pod IP。该模式仅
+展示处于 `Running` 状态且已分配 Pod IP 的 Spark Driver（`spark-role=driver`、端口 `4040`）和
+Flink JobManager（`type=flink-native-kubernetes`、`component=jobmanager`、端口 `8081`）。Pod
+重建并更换 IP 后，刷新索引即可取得新地址；Pod 模式的链接固定使用路径格式。
 
 单个命名空间读取失败时，索引页仍会展示其他可访问命名空间中的 Spark 与 Flink Service，并在页面
 中列出失败的命名空间和排查提示。权限错误（HTTP 403）通常表示对应命名空间中的 Role 或
@@ -129,6 +142,7 @@ RoleBinding 缺失。包含命名空间错误的 API 结果不会被缓存，修
 | `proxy.clusterDomain` | `cluster.local` | Kubernetes Service DNS 后缀。 |
 | `proxy.upstream.port` | `4040` | Spark UI Service 端口，也是服务发现使用的端口。 |
 | `proxy.flinkUpstream.port` | `8081` | Flink Web UI Service 端口。 |
+| `index.discoveryMode` | `service` | 索引数据来源：`service` 查询 Kubernetes Service；`pod` 查询运行中 Pod 并直接代理其 Pod IP。 |
 | `index.scheme` | `http` | 索引生成链接使用的协议；HTTPS 终止在外部 Ingress/LB 时设为 `https`。 |
 | `index.linkFormat` | `path` | 索引链接格式，可选 `path` 或 `subdomain`。 |
 | `index.cacheSeconds` | `30` | 成功的服务发现 API 结果缓存秒数；设为 `0` 表示不设置过期时间。 |

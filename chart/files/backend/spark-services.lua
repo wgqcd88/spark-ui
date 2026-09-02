@@ -1,12 +1,46 @@
 local cjson = require "cjson.safe"
 local cache = ngx.shared.spark_service_index
-local cache_key = "services:v1"
+local discovery_mode = "{{ .Values.index.discoveryMode }}"
+
+local function query_arg(value)
+  if type(value) ~= "string" or value == "" then
+    return nil
+  end
+  return value
+end
+
+local query = query_arg(ngx.var.arg_q)
+if query then
+  query = string.lower(query)
+end
+
+local filter_type = query_arg(ngx.var.arg_type)
+if filter_type ~= "spark" and filter_type ~= "flink" then
+  filter_type = nil
+end
+
+local filter_namespace = query_arg(ngx.var.arg_namespace)
+local cache_key = table.concat({
+  "services",
+  discovery_mode,
+  filter_type or "all",
+  filter_namespace or "all",
+  query or "all",
+  "v2"
+}, ":")
 
 local namespaces = {
 {{- range .Values.index.namespaces }}
   {{ . | quote }},
 {{- end }}
 }
+
+local selected_namespaces = {}
+for _, namespace in ipairs(namespaces) do
+  if not filter_namespace or namespace == filter_namespace then
+    selected_namespaces[#selected_namespaces + 1] = namespace
+  end
+end
 
 local function as_json_array(items)
   if #items == 0 and cjson.empty_array ~= nil then
@@ -42,8 +76,9 @@ local function namespace_error(status)
   return { status = status, code = "upstream_error" }
 end
 
-local function get_namespace_services(namespace)
-  local response = ngx.location.capture("/_kubernetes_services", {
+local function get_namespace_resources(namespace)
+  local location = discovery_mode == "pod" and "/_kubernetes_pods" or "/_kubernetes_services"
+  local response = ngx.location.capture(location, {
     args = { namespace = namespace }
   })
 
@@ -51,7 +86,7 @@ local function get_namespace_services(namespace)
     local status = response and response.status or 502
     ngx.log(
       ngx.ERR,
-      "Kubernetes Service API returned ",
+      "Kubernetes API returned ",
       status,
       " for namespace ",
       namespace
@@ -63,7 +98,7 @@ local function get_namespace_services(namespace)
   if type(services) ~= "table" or type(services.items) ~= "table" then
     ngx.log(
       ngx.ERR,
-      "Kubernetes Service API returned invalid JSON for namespace ",
+      "Kubernetes API returned invalid JSON for namespace ",
       namespace,
       ": ",
       decode_error or "missing items"
@@ -110,6 +145,34 @@ local function is_flink_service(service)
   return false
 end
 
+local function has_port(resource, expected_port)
+  for _, container in ipairs(resource.spec and resource.spec.containers or {}) do
+    for _, port in ipairs(container.ports or {}) do
+      if port.containerPort == expected_port then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+local function is_spark_pod(pod)
+  local labels = pod.metadata and pod.metadata.labels or {}
+  return pod.status and pod.status.phase == "Running"
+    and pod.status.podIP
+    and labels["spark-role"] == "driver"
+    and has_port(pod, {{ .Values.proxy.upstream.port }})
+end
+
+local function is_flink_pod(pod)
+  local labels = pod.metadata and pod.metadata.labels or {}
+  return pod.status and pod.status.phase == "Running"
+    and pod.status.podIP
+    and labels.type == "flink-native-kubernetes"
+    and labels.component == "jobmanager"
+    and has_port(pod, {{ .Values.proxy.flinkUpstream.port }})
+end
+
 local function service_url(namespace, name, service_type)
 {{- if eq .Values.index.linkFormat "path" }}
   if service_type == "flink" then
@@ -142,45 +205,85 @@ local function service_url(namespace, name, service_type)
 {{- end }}
 end
 
+local function pod_url(pod_ip, service_type)
+  if service_type == "flink" then
+    return string.format("/pod/flink/%s/", pod_ip)
+  end
+  return string.format("/pod/spark/%s/jobs", pod_ip)
+end
+
+local function text_value(value)
+  return type(value) == "string" and value or ""
+end
+
+local function matches_query(service)
+  if not query then
+    return true
+  end
+
+  local search_text = table.concat({
+    text_value(service.namespace),
+    text_value(service.name),
+    text_value(service.displayName),
+    text_value(service.appId),
+    text_value(service.type)
+  }, " ")
+  return string.lower(search_text):find(query, 1, true) ~= nil
+end
+
 local discovered_services = {}
 local namespace_errors = {}
 local successful_namespaces = 0
 
-for _, namespace in ipairs(namespaces) do
-  local services, request_error = get_namespace_services(namespace)
+for _, namespace in ipairs(selected_namespaces) do
+  local resources, request_error = get_namespace_resources(namespace)
   if request_error then
     request_error.namespace = namespace
     namespace_errors[#namespace_errors + 1] = request_error
   else
     successful_namespaces = successful_namespaces + 1
 
-    for _, service in ipairs(services) do
-      local metadata = service.metadata or {}
+    for _, resource in ipairs(resources) do
+      local metadata = resource.metadata or {}
       local name = metadata.name
       local service_type
-      if is_flink_service(service) then
-        service_type = "flink"
-      elseif is_spark_service(service) then
-        service_type = "spark"
+      if discovery_mode == "pod" then
+        if is_flink_pod(resource) then
+          service_type = "flink"
+        elseif is_spark_pod(resource) then
+          service_type = "spark"
+        end
+      else
+        if is_flink_service(resource) then
+          service_type = "flink"
+        elseif is_spark_service(resource) then
+          service_type = "spark"
+        end
       end
 
-      if name and service_type then
+      if name and service_type and (not filter_type or service_type == filter_type) then
         local labels = metadata.labels or {}
-        local selector = service.spec and service.spec.selector or {}
+        local selector = resource.spec and resource.spec.selector or {}
         local display_name = labels["spark-app-name"] or selector["spark-app-name"]
           or labels["app"] or labels["cluster-id"] or name
         local app_id = labels["spark-app-selector"] or selector["spark-app-selector"]
           or labels["cluster-id"] or labels["app"]
 
-        discovered_services[#discovered_services + 1] = {
+        local discovered_service = {
           namespace = namespace,
           name = name,
           displayName = display_name,
           appId = app_id or cjson.null,
           createdAt = metadata.creationTimestamp or cjson.null,
           type = service_type,
-          url = service_url(namespace, name, service_type)
+          url = discovery_mode == "pod"
+            and pod_url(resource.status.podIP, service_type)
+            or service_url(namespace, name, service_type)
         }
+
+        if matches_query(discovered_service) then
+          discovered_services[#discovered_services + 1] = discovered_service
+        end
       end
     end
   end
@@ -196,9 +299,15 @@ local response_payload = {
   services = as_json_array(discovered_services),
   errors = as_json_array(namespace_errors),
   summary = {
-    totalNamespaces = #namespaces,
+    totalNamespaces = #selected_namespaces,
     successfulNamespaces = successful_namespaces,
-    failedNamespaces = #namespace_errors
+    failedNamespaces = #namespace_errors,
+    namespaces = as_json_array(namespaces),
+    filters = {
+      q = query or cjson.null,
+      type = filter_type or cjson.null,
+      namespace = filter_namespace or cjson.null
+    }
   }
 }
 

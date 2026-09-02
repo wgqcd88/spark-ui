@@ -2,6 +2,9 @@
 {{- if not (has $linkFormat (list "path" "subdomain")) -}}
 {{- fail "index.linkFormat must be \"path\" or \"subdomain\"" -}}
 {{- end -}}
+{{- if not (has .Values.index.discoveryMode (list "service" "pod")) -}}
+{{- fail "index.discoveryMode must be \"service\" or \"pod\"" -}}
+{{- end -}}
 {{- if empty .Values.index.namespaces -}}
 {{- fail "index.namespaces must contain at least one namespace" -}}
 {{- end -}}
@@ -20,6 +23,44 @@ data:
       server_name {{ .Values.proxy.baseDomain }};
 
       resolver {{ .Values.proxy.resolver }} valid=10s;
+
+      location ~ "^/pod/flink/(?<pod_ip>[0-9]{1,3}(?:\.[0-9]{1,3}){3})(?<ui_path>/.*)$" {
+        proxy_pass http://$pod_ip:{{ .Values.proxy.flinkUpstream.port }}$ui_path$is_args$args;
+        proxy_redirect ~^https?://[^/]+(/.*)$ /pod/flink/$pod_ip$1;
+        proxy_redirect ~^(/.*)$ /pod/flink/$pod_ip$1;
+        absolute_redirect off;
+        sub_filter_once off;
+        sub_filter 'href="/' 'href="/pod/flink/$pod_ip/';
+        sub_filter 'src="/' 'src="/pod/flink/$pod_ip/';
+        sub_filter 'action="/' 'action="/pod/flink/$pod_ip/';
+        proxy_http_version 1.1;
+        proxy_set_header Accept-Encoding "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+      }
+
+      location ~ "^/pod/spark/(?<pod_ip>[0-9]{1,3}(?:\.[0-9]{1,3}){3})(?<ui_path>/.*)$" {
+        proxy_pass http://$pod_ip:{{ .Values.proxy.upstream.port }}$ui_path$is_args$args;
+        proxy_redirect ~^https?://[^/]+(/.*)$ /pod/spark/$pod_ip$1;
+        proxy_redirect ~^(/.*)$ /pod/spark/$pod_ip$1;
+        absolute_redirect off;
+        sub_filter_once off;
+        sub_filter 'href="/' 'href="/pod/spark/$pod_ip/';
+        sub_filter 'src="/' 'src="/pod/spark/$pod_ip/';
+        sub_filter 'action="/' 'action="/pod/spark/$pod_ip/';
+        sub_filter "setUIRoot('')" "setUIRoot('/pod/spark/$pod_ip')";
+        sub_filter "setAppBasePath('')" "setAppBasePath('/pod/spark/$pod_ip')";
+        sub_filter '"/api/' '"/pod/spark/$pod_ip/api/';
+        sub_filter "'/api/" "'/pod/spark/$pod_ip/api/";
+        proxy_http_version 1.1;
+        proxy_set_header Accept-Encoding "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+      }
 
       location ~ ^/flink/(?<service>[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)/(?<namespace>{{ join "|" .Values.index.namespaces }})(?<ui_path>/.*)$ {
         proxy_pass http://$service.$namespace.svc.{{ .Values.proxy.clusterDomain }}:{{ .Values.proxy.flinkUpstream.port }}$ui_path$is_args$args;
@@ -124,6 +165,24 @@ data:
         proxy_ssl_trusted_certificate /var/run/secrets/kubernetes.io/serviceaccount/ca.crt;
         proxy_ssl_verify on;
         proxy_set_header Authorization "Bearer $kubernetes_token";
+        proxy_set_header Accept-Encoding "";
+      }
+
+      location = /_kubernetes_pods {
+        internal;
+        set_by_lua_block $kubernetes_token {
+          local token_file = assert(io.open("/var/run/secrets/kubernetes.io/serviceaccount/token", "r"))
+          local token = assert(token_file:read("*a"))
+          token_file:close()
+          return token
+        }
+        proxy_pass https://kubernetes.default.svc.{{ .Values.proxy.clusterDomain }}/api/v1/namespaces/$arg_namespace/pods;
+        proxy_ssl_name kubernetes.default.svc;
+        proxy_ssl_server_name on;
+        proxy_ssl_trusted_certificate /var/run/secrets/kubernetes.io/serviceaccount/ca.crt;
+        proxy_ssl_verify on;
+        proxy_set_header Authorization "Bearer $kubernetes_token";
+        proxy_set_header Accept-Encoding "";
       }
     }
 

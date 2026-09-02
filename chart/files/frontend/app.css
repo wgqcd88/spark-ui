@@ -17,7 +17,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -85,7 +86,8 @@ h1 {
   clip: rect(0, 0, 0, 0);
 }
 
-.search input {
+.search input,
+.search select {
   flex: 1;
   width: 100%;
   padding: 10px 12px;
@@ -95,9 +97,15 @@ h1 {
   border-radius: 8px;
 }
 
-.search input:focus {
+.search input:focus,
+.search select:focus {
   border-color: #2563eb;
   outline: 3px solid rgb(37 99 235 / 15%);
+}
+
+.search select {
+  flex: 0 0 150px;
+  cursor: pointer;
 }
 
 .search button,
@@ -256,6 +264,10 @@ h1 {
 
   .search input {
     flex-basis: 100%;
+  }
+
+  .search select {
+    flex: 1 1 140px;
   }
 
   .service-columns {

@@ -32,6 +32,16 @@
         placeholder="搜索应用名称、Service 名称、Namespace 或应用 ID"
         autocomplete="off"
       >
+      <label for="service-type-filter">类型</label>
+      <select id="service-type-filter" name="type">
+        <option value="">全部类型</option>
+        <option value="spark">Spark</option>
+        <option value="flink">Flink</option>
+      </select>
+      <label for="service-namespace-filter">命名空间</label>
+      <select id="service-namespace-filter" name="namespace">
+        <option value="">全部命名空间</option>
+      </select>
       <button type="submit">搜索</button>
     </form>
 
